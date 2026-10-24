@@ -1,6 +1,6 @@
 {
   "name": "@xeno-js/postgresql",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "PostgreSQL database integration for Xeno.js using Drizzle ORM, node-postgres and TypeScript.",
   "repository": {
     "type": "git",
