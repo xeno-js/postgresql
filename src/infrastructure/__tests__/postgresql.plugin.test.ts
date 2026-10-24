@@ -1,7 +1,9 @@
-﻿import type { AppBuilder, IConfigurationService } from '@xeno-js/core'
+import type { IConfigurationService, XenoAppBuilder, XenoRegistry } from '@xeno-js/core'
+import type { PoolOptions } from 'pg'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { XenoDbRegistry } from '../db-registry.types'
+import type { DbContext, DbTransaction } from '../db.types'
+import { withPostgresql } from '../postgresql.plugin'
 
 const { createMock, MockDbModuleClass } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -11,7 +13,10 @@ const { createMock, MockDbModuleClass } = vi.hoisted(() => ({
 }))
 
 class ConfigurationServiceMock implements IConfigurationService {
-  public get = vi.fn().mockReturnValue({})
+  public get = vi.fn().mockReturnValue('postgres://localhost:5432/test')
+  public getEnvironment(): string {
+    return 'test'
+  }
   public getNumber = vi.fn().mockReturnValue(0)
   public getBoolean = vi.fn().mockReturnValue(false)
   public getOrThrow = vi.fn().mockReturnValue('default')
@@ -26,68 +31,85 @@ vi.mock('../db-client.factory', () => ({
 vi.mock('@xeno-js/core', () => ({
   DbModule: MockDbModuleClass,
   Guards: {
-    isDefined: vi.fn((val: unknown) => val !== null && val !== undefined),
+    isDefined: vi.fn((value: unknown) => value !== null && value !== undefined),
   },
+  definePlugin: vi.fn((_kind: string, plugin: (...args: never[]) => unknown) => {
+    Object.defineProperty(plugin, '__kind', { value: _kind })
+    return plugin
+  }),
 }))
 
-import { withPostgresql } from '../postgresql.plugin'
+type Registry = XenoRegistry<DbContext, DbTransaction>
+type TestBuilder = XenoAppBuilder<Registry>
+
+function makeBuilder() {
+  const addModule = vi.fn(
+    (_name: string, _factory: () => Promise<unknown>, _options: unknown, _priority: number) =>
+      undefined,
+  )
+  const builder = { addModule } as unknown as TestBuilder
+
+  return { builder, addModule }
+}
 
 describe('withPostgresql', () => {
   beforeEach(() => {
-    createMock.mockReset()
+    vi.clearAllMocks()
   })
 
-  it('adds the PostgreSQL module using default options', async () => {
-    const client = { kind: 'default-client' }
+  it('creates the database client from the configuration service and registers the module', async () => {
+    const client = { connectionString: 'postgres://localhost:5432/test', kind: 'postgres-client' }
     createMock.mockReturnValue(client)
+    const config = new ConfigurationServiceMock()
+    const { builder, addModule } = makeBuilder()
+    const plugin = withPostgresql()
 
-    const addModule = vi.fn().mockReturnThis()
-    const builder = { addModule } as unknown as AppBuilder<XenoDbRegistry>
+    expect(plugin).toBeTypeOf('function')
+    expect(plugin.__kind).toBe('db')
+    expect(plugin(builder, config)).toBeUndefined()
 
-    const result = withPostgresql()(builder, new ConfigurationServiceMock())
+    expect(createMock).toHaveBeenCalledWith({}, 'test')
+    expect(addModule).toHaveBeenCalledOnce()
+    expect(addModule).toHaveBeenCalledWith('PostgresDbModule', expect.any(Function), { client }, 2)
 
-    expect(result).toBe(builder)
-    expect(createMock).toHaveBeenCalledWith({ connectionString: {} })
-    expect(addModule).toHaveBeenCalledTimes(1)
-
-    const [name, factory, moduleOptions] = addModule.mock.calls[0] as [
-      string,
-      () => Promise<unknown>,
-      { client: typeof client },
-    ]
-    expect(name).toBe('PostgresDbModule')
-    expect(moduleOptions).toEqual({ client })
-
-    const dbModule = await factory()
-    expect(dbModule).toBeInstanceOf(MockDbModuleClass)
+    const factory = addModule.mock.calls[0]?.[1]
+    expect(factory).toBeTypeOf('function')
+    await expect(factory?.()).resolves.toBeInstanceOf(MockDbModuleClass)
   })
 
-  it('passes the pool configuration to the DbClientFactory', () => {
+  it('passes mutable pool options and configuration to the optional setup action', () => {
     const client = { kind: 'configured-client' }
-    const poolOptions = {
-      connectionString: 'postgres://localhost:5432/test',
-      max: 1,
-      maxUses: 10,
-      allowExitOnIdle: true,
-      maxLifetimeSeconds: 30,
-      idleTimeoutMillis: 30000,
-    }
     createMock.mockReturnValue(client)
+    const config = new ConfigurationServiceMock()
+    const setup = vi.fn((options: PoolOptions, _config: IConfigurationService) => {
+      options.connectionString = 'postgres://localhost:5432/test'
+      options.max = 12
+      options.idleTimeoutMillis = 30000
+      options.allowExitOnIdle = true
+    })
+    const { builder, addModule } = makeBuilder()
 
-    const addModule = vi.fn().mockReturnThis()
-    const builder = { addModule } as unknown as AppBuilder<XenoDbRegistry>
+    withPostgresql(setup)(builder, config)
 
-    withPostgresql((opts) => {
-      opts.connectionString = 'postgres://localhost:5432/test'
-      opts.max = 1
-      opts.maxUses = 10
-      opts.allowExitOnIdle = true
-      opts.maxLifetimeSeconds = 30
-      opts.idleTimeoutMillis = 30000
-    })(builder, new ConfigurationServiceMock())
-
-    expect(createMock).toHaveBeenCalledWith(poolOptions)
-    expect(addModule).toHaveBeenCalledTimes(1)
-    expect(addModule.mock.calls[0][2]).toEqual({ client })
+    expect(setup).toHaveBeenCalledOnce()
+    expect(setup).toHaveBeenCalledWith(
+      {
+        connectionString: 'postgres://localhost:5432/test',
+        max: 12,
+        idleTimeoutMillis: 30000,
+        allowExitOnIdle: true,
+      },
+      config,
+    )
+    expect(createMock).toHaveBeenCalledWith(
+      {
+        connectionString: 'postgres://localhost:5432/test',
+        max: 12,
+        idleTimeoutMillis: 30000,
+        allowExitOnIdle: true,
+      },
+      'test',
+    )
+    expect(addModule).toHaveBeenCalledWith('PostgresDbModule', expect.any(Function), { client }, 2)
   })
 })
