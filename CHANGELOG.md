@@ -1,3 +1,5 @@
+## [2.0.1](https://github.com/xeno-js/postgresql/compare/v2.0.0...v2.0.1) (2026-11-25)
+
 # [2.0.0](https://github.com/xeno-js/postgresql/compare/v1.0.0...v2.0.0) (2026-10-24)
 
 ### Features
